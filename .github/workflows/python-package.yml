@@ -15,13 +15,13 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest]
-        python-version: ["3.6", "3.7", "3.8", "3.9"]
+        os: [ubuntu-20.04, windows-latest, macos-latest]
+        python-version: ["3.8", "3.9", "3.10", "3.11", "3.12"]
 
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v3
     - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v2
+      uses: actions/setup-python@v4
       with:
         python-version: ${{ matrix.python-version }}
     - name: Install dependencies
@@ -31,6 +31,11 @@ jobs:
         pip install .[dashboard]
         pip install .[dill]
         pip install .[testing]
+    - name: Set ulimit for macOS
+      if: matrix.os == 'macos-latest'
+      run: |
+        ulimit -a
+        ulimit -n 1024
     - name: Lint with flake8
       run: |
         # stop the build if there are Python syntax errors or undefined names
@@ -40,4 +45,4 @@ jobs:
     - name: Test with pytest
       timeout-minutes: 30
       run: |
-        pytest -v -o log_cli=true
+        pytest -v -o log_cli=true -s

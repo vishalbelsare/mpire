@@ -1,6 +1,185 @@
 Changelog
 =========
 
+Unreleased
+----------
+
+* Expanded error message in case of unexpected worker death (`#130`_)
+* The progress bar will now show ``Keyboard interrupt`` when a keyboard interrupt is raised to distinguish it from 
+  other exceptions
+* In the case of an unexpected worker death (e.g., OOM errors) and the worker was working on an ``apply`` task, the 
+  worker will now be restarted and the other workers will continue their work. The task that caused the death will be 
+  set to failed (`#110`_)
+
+.. _#110: https://github.com/sybrenjansen/mpire/issues/110
+.. _#130: https://github.com/sybrenjansen/mpire/issues/130
+
+2.10.2
+------
+
+*(2024-05-07)*
+
+* Function details in ``progress_bar.py`` are only obtained when the dashboard is running (`#128`_)
+* Obtaining the user name is now put in a try-except block to prevent MPIRE from crashing when the user name cannot be
+  obtained. which can happen when running in a container as a non-root user (`#128`_)
+
+.. _#128: https://github.com/sybrenjansen/mpire/issues/128
+
+
+2.10.1
+------
+
+*(2024-03-19)*
+
+* Fixed a bug in the timeout handler where the cache dictionary could be changed during iteration (`#123`_)
+* Fixed an authentication error when using a progress bar or insights in a spawn or forkserver context when using dill 
+  (`#124`_)
+
+.. _#123: https://github.com/sybrenjansen/mpire/issues/123
+.. _#124: https://github.com/sybrenjansen/mpire/issues/124
+
+
+2.10.0
+------
+
+*(2024-02-19)*
+
+* Added support for macOS (`#27`_, `#79`_, `#91`_)
+
+  - Fixes memory leaks on macOS
+  - Reduced the amount of semaphores used
+  - Issues a warning when ``cpu_ids`` is used on macOS
+
+* Added :meth:`mpire.dashboard.set_stacklevel` to set the stack level in the dashboard. This influences what line to 
+  display in the 'Invoked on line' section. (`#118`_)
+* Use function details from the `__call__` method on the dashboard in case the
+  callable being executed is a class instance (`#117`_)
+* Use (global) average rate for the estimate on the dashboard when smoothing=0
+  (`#117`_)
+* Make it possible to reuse the same `progress_bar_options` without raising warnings (`#117`_)
+* Removed deprecated `progress_bar_position` parameter from the `map` functions. Use 
+  `progress_bar_options['position']` instead (added since v2.6.0)
+
+.. _#27: https://github.com/sybrenjansen/mpire/issues/27
+.. _#79: https://github.com/sybrenjansen/mpire/issues/79
+.. _#91: https://github.com/sybrenjansen/mpire/issues/91
+.. _#117: https://github.com/sybrenjansen/mpire/pull/117
+.. _#118: https://github.com/sybrenjansen/mpire/pull/118
+
+
+2.9.0
+-----
+
+*(2024-01-08)*
+
+* Added support for the ``rich`` progress bar style (`#96`_)
+* Added the option to only show progress on the dashboard. (`#107`_)
+* Progress bars are now supported on Windows when using threading as start method.
+* Insights now also work when using the ``forkserver`` and ``spawn`` start methods. (`#104`_)
+* When using insights on Windows the arguments of the top 5 longest tasks are now available as well.
+* Fixed deprecated ``escape`` import from ``flask`` by importing directly from ``markupsafe``. (`#106`_)
+* Fixed :meth:`mpire.dashboard.start_dashboard` freeze when there are no two ports available. (`#112`_)
+* Added :meth:`mpire.dashboard.shutdown_dashboard` to shutdown the dashboard.
+* Added ``py.typed`` file to prompt ``mypy`` for type checking. (`#108`_)
+
+.. _#96: https://github.com/sybrenjansen/mpire/issues/96
+.. _#107: https://github.com/sybrenjansen/mpire/pull/107
+.. _#104: https://github.com/sybrenjansen/mpire/issues/104
+.. _#106: https://github.com/sybrenjansen/mpire/issues/106
+.. _#112: https://github.com/sybrenjansen/mpire/issues/112
+.. _#108: https://github.com/sybrenjansen/mpire/pull/108
+
+
+2.8.1
+-----
+
+*(2023-11-08)*
+
+* Excluded the ``tests`` folder from MPIRE distributions (`#89`_)
+* Added a workaround for semaphore leakage on macOS and fixed a bug when working in a fork context while the system
+  default is spawn (`#92`_)
+* Fix progressbar percentage on dashboard (`#101`_)
+* Fixed a bug where starting multiple `apply_async` tasks with a task timeout didn't interrupt all tasks when the
+  timeout was reached (`#98`_)
+* Add testing python 3.12 to workflow and drop 3.6 and 3.7 (`#102`_)
+
+.. _#89: https://github.com/sybrenjansen/mpire/issues/89
+.. _#92: https://github.com/sybrenjansen/mpire/issues/92
+.. _#98: https://github.com/sybrenjansen/mpire/issues/98
+.. _#101: https://github.com/sybrenjansen/mpire/pull/101
+.. _#102: https://github.com/sybrenjansen/mpire/pull/102
+
+
+2.8.0
+-----
+
+*(2023-08-16)*
+
+* Added support for Python 3.11 (`#67`_)
+
+.. _#67: https://github.com/sybrenjansen/mpire/issues/67
+
+2.7.1
+-----
+
+*(2023-04-14)*
+
+* Transfered ownership of the project from `Slimmer AI` to `sybrenjansen`
+
+2.7.0
+-----
+
+*(2023-03-17)*
+
+* Added the :meth:`mpire.WorkerPool.apply` and :meth:`mpire.WorkerPool.apply_async` functions (`#63`_)
+* When inside a Jupyter notebook, the progress bar will not automatically switch to a widget anymore. ``tqdm`` cannot
+  always determine with certainty that someone is in a notebook or, e.g., a Jupyter console. Another reason is to avoid
+  the many errors people get when having widgets or javascript disabled. See :ref:`progress_bar_style` for changing
+  the progress bar to a widget (`#71`_)
+* The :meth:`mpire.dashboard.connect_to_dashboard` function now raises a `ConnectionRefused` error when the dashboard
+  isn't running, instead of silently failing and deadlocking the next ``map`` call with a progress bar (`#68`_)
+* Added support for a progress bar without knowing the size of the iterable. It used to disable the progress bar when
+  the size was unknown
+* Changed how ``max_tasks_active`` is handled. It now applies to the number of tasks that are currently being
+  processed, instead of the number of chunks of tasks, as you would expect from the name. Previously, when the chunk
+  size was set to anything other than 1, the number of active tasks could be higher than ``max_tasks_active``
+* Updated some exception messages and docs (`#69`_)
+* Changed how worker results, restarts, timeouts, unexpected deaths, and exceptions are handled. They are now handled
+  by individual threads such that the main thread is more responsive. The API is the same, so no user changes are
+  needed
+* Mixing multiple ``map`` calls now raises an error (see :ref:`mixing-multiple-map-calls`)
+* Fixed a bug where calling a ``map`` function with a progress bar multiple times in a row didn't display the progress
+  bar correctly
+* Fixed a bug where the dashboard didn't show an error when an exit function raised an exception
+
+.. _#63: https://github.com/sybrenjansen/mpire/issues/63
+.. _#68: https://github.com/sybrenjansen/mpire/issues/68
+.. _#69: https://github.com/sybrenjansen/mpire/issues/69
+.. _#71: https://github.com/sybrenjansen/mpire/issues/71
+
+
+2.6.0
+-----
+
+*(2022-08-29)*
+
+* Added Python 3.10 support
+* The ``tqdm`` progress bar can now be customized using the ``progress_bar_options`` parameter in the ``map`` functions
+  (`#57`_)
+* Using ``progress_bar_position`` from a ``map`` function is now deprecated and will be removed in MPIRE v2.10.0. Use
+  ``progress_bar_options['position']`` instead
+* Deprecated ``enable_insights`` from a ``map`` function, use ``enable_insights`` in the WorkerPool constructor instead
+* Fixed a bug where a worker could exit before an exception was entirely sent over the queue, causing a deadlock
+  (`#56`_)
+* Fixed a bug where exceptions with init arguments weren't handled correctly (`#58`_)
+* Fixed a rare and weird bug in Windows that could cause a deadlock (probably fixes `#55`_)
+
+.. _#55: https://github.com/sybrenjansen/mpire/issues/55
+.. _#56: https://github.com/sybrenjansen/mpire/issues/56
+.. _#57: https://github.com/sybrenjansen/mpire/issues/57
+.. _#58: https://github.com/sybrenjansen/mpire/issues/58
+
+
 2.5.0
 -----
 
@@ -9,7 +188,7 @@ Changelog
 * Added the option to fix the order of tasks given to the workers (`#46`_)
 * Fixed a bug where updated WorkerPool parameters aren't used in subsequent ``map`` calls when ``keep_alive`` is enabled
 
-.. _#46: https://github.com/Slimmer-AI/mpire/issues/46
+.. _#46: https://github.com/sybrenjansen/mpire/issues/46
 
 2.4.0
 -----
@@ -20,8 +199,8 @@ Changelog
   stopped (`#36`_)
 * A WorkerPool can now be started within a thread which isn't the main thread (`#44`_)
 
-.. _#36: https://github.com/Slimmer-AI/mpire/issues/36
-.. _#44: https://github.com/Slimmer-AI/mpire/issues/44
+.. _#36: https://github.com/sybrenjansen/mpire/issues/36
+.. _#44: https://github.com/sybrenjansen/mpire/issues/44
 
 
 2.3.5
@@ -32,8 +211,8 @@ Changelog
 * MPIRE now handles defunct child processes properly, instead of deadlocking (`#34`_)
 * Added benchmark highlights to README (`#38`_)
 
-.. _#34: https://github.com/Slimmer-AI/mpire/issues/34
-.. _#38: https://github.com/Slimmer-AI/mpire/issues/38
+.. _#34: https://github.com/sybrenjansen/mpire/issues/34
+.. _#38: https://github.com/sybrenjansen/mpire/issues/38
 
 
 2.3.4
@@ -47,8 +226,8 @@ Changelog
 * Fixes insights unit tests that could sometime fail because it was too fast
 
 .. _PEP-508: https://www.python.org/dev/peps/pep-0508/#environment-markers
-.. _#30: https://github.com/Slimmer-AI/mpire/issues/30
-.. _#32: https://github.com/Slimmer-AI/mpire/issues/32
+.. _#30: https://github.com/sybrenjansen/mpire/issues/30
+.. _#32: https://github.com/sybrenjansen/mpire/issues/32
 
 2.3.3
 -----
@@ -66,7 +245,7 @@ Changelog
 
 * Included license file in source distribution (`#25`_)
 
-.. _#25: https://github.com/Slimmer-AI/mpire/pull/25
+.. _#25: https://github.com/sybrenjansen/mpire/pull/25
 
 2.3.1
 -----
@@ -75,7 +254,7 @@ Changelog
 
 * Made connecting to the tqdm manager more robust (`#23`_)
 
-.. _#23: https://github.com/Slimmer-AI/mpire/issues/23
+.. _#23: https://github.com/sybrenjansen/mpire/issues/23
 
 2.3.0
 -----
@@ -89,8 +268,8 @@ Changelog
   deprecated and will be removed in MPIRE v2.6.0.
 * Restructured docs and updated several sections for Windows users.
 
-.. _#13: https://github.com/Slimmer-AI/mpire/pull/13
-.. _#15: https://github.com/Slimmer-AI/mpire/issues/15
+.. _#13: https://github.com/sybrenjansen/mpire/pull/13
+.. _#15: https://github.com/sybrenjansen/mpire/issues/15
 
 2.2.1
 -----
@@ -99,7 +278,7 @@ Changelog
 
 * Fixed compatibility with newer tqdm versions (``>= 4.62.2``) (`#11`_)
 
-.. _#11: https://github.com/Slimmer-AI/mpire/issues/11
+.. _#11: https://github.com/sybrenjansen/mpire/issues/11
 
 2.2.0
 -----
@@ -113,8 +292,8 @@ Changelog
   * When using ``dill`` and an exception occurs, or when the exception occurs in an exit function, it can print
     additional ``OSError`` messages in the terminal, but these can be safely ignored.
 
-.. _#6: https://github.com/Slimmer-AI/mpire/issues/6
-.. _#7: https://github.com/Slimmer-AI/mpire/issues/7
+.. _#6: https://github.com/sybrenjansen/mpire/issues/6
+.. _#7: https://github.com/sybrenjansen/mpire/issues/7
 
 2.1.1
 -----

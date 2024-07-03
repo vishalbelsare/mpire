@@ -1,14 +1,11 @@
 import ctypes
 import math
 import multiprocessing.context
-import multiprocessing.managers
-from datetime import datetime
 from functools import partial
+import time
 from typing import Dict, Optional, List, Tuple
 
-from mpire.context import RUNNING_WINDOWS
-from mpire.signal import ignore_keyboard_interrupt
-from mpire.utils import format_seconds
+from mpire.utils import NonPickledSyncManager, format_seconds
 
 
 class WorkerInsights:
@@ -18,15 +15,17 @@ class WorkerInsights:
     exit functions are provided it will time those as well.
     """
 
-    def __init__(self, ctx: multiprocessing.context.BaseContext, n_jobs: int) -> None:
+    def __init__(self, ctx: multiprocessing.context.BaseContext, n_jobs: int, use_dill: bool) -> None:
         """
         Parameter class for worker insights.
 
         :param ctx: Multiprocessing context
         :param n_jobs: Number of workers
+        :param use_dill: Whether dill is used as serialization library
         """
         self.ctx = ctx
         self.n_jobs = n_jobs
+        self.use_dill = use_dill
 
         # Whether insights have been enabled or not
         self.insights_enabled = False
@@ -35,7 +34,7 @@ class WorkerInsights:
         self.insights_manager = None
         self.insights_manager_lock = None
 
-        # `datetime` object indicating at what time the Worker instance was created and started
+        # Timestamp indicating at what time the Worker instance was created and started
         self.worker_start_up_time = None
 
         # Array object which holds the total number of seconds the workers take to start up
@@ -66,12 +65,11 @@ class WorkerInsights:
         :param enable_insights: Whether to enable worker insights
         """
         if enable_insights:
-            # When we're on Windows, we don't use a Manager as it's giving authentication errors. The max_task_args
-            # information is therefore not available on Windows systems. This needs to be fixed at some point in time
-            if not RUNNING_WINDOWS:
-                # We need to ignore the KeyboardInterrupt signal for the manager to avoid BrokenPipeErrors
-                self.insights_manager = multiprocessing.managers.SyncManager(ctx=self.ctx)
-                self.insights_manager.start(ignore_keyboard_interrupt)
+            # We need to use a special wrapper which sets the manager to None when pickled. For some reason Python 
+            # won't use the __getstate__/__setstate__ of this class when passing the object to a worker, so we move
+            # the logic to the wrapper instead.
+            self.insights_manager = NonPickledSyncManager(self.use_dill)
+            self.insights_manager.start()
             self.insights_manager_lock = self.ctx.Lock()
             self.worker_start_up_time = self.ctx.Array(ctypes.c_double, self.n_jobs, lock=False)
             self.worker_init_time = self.ctx.Array(ctypes.c_double, self.n_jobs, lock=False)
@@ -80,11 +78,7 @@ class WorkerInsights:
             self.worker_working_time = self.ctx.Array(ctypes.c_double, self.n_jobs, lock=False)
             self.worker_exit_time = self.ctx.Array(ctypes.c_double, self.n_jobs, lock=False)
             self.max_task_duration = self.ctx.Array(ctypes.c_double, self.n_jobs * 5, lock=False)
-            if RUNNING_WINDOWS:
-                # Doesn't actually do anything, but reduces the amount of if/else statements in other code parts
-                self.max_task_args = [""] * self.n_jobs * 5
-            else:
-                self.max_task_args = self.insights_manager.list([""] * self.n_jobs * 5)
+            self.max_task_args = self.insights_manager.list([""] * self.n_jobs * 5)
         else:
             self.insights_manager = None
             self.insights_manager_lock = None
@@ -113,15 +107,15 @@ class WorkerInsights:
                                  self.max_task_args[worker_id * 5:(worker_id + 1) * 5]))
                         if self.max_task_duration is not None else None)
 
-    def update_start_up_time(self, worker_id: int, start_time: datetime) -> None:
+    def update_start_up_time(self, worker_id: int, start_time: float) -> None:
         """
         Update start up time
 
         :param worker_id: Worker ID
-        :param start_time: datetime
+        :param start_time: Timestamp
         """
         if self.insights_enabled:
-            self.worker_start_up_time[worker_id] = (datetime.now() - start_time).total_seconds()
+            self.worker_start_up_time[worker_id] = time.time() - start_time
 
     def update_n_completed_tasks(self, worker_id: int) -> None:
         """
@@ -132,25 +126,25 @@ class WorkerInsights:
         if self.insights_enabled:
             self.worker_n_completed_tasks[worker_id] += 1
 
-    def update_task_insights(self, worker_id: int, max_task_duration_last_updated: datetime,
+    def update_task_insights(self, worker_id: int, max_task_duration_last_updated: float,
                              max_task_duration_list: Optional[List[Tuple[float, str]]],
-                             force_update: bool = False) -> datetime:
+                             force_update: bool = False) -> float:
         """
         Update synced containers with new top 5 max task duration + args. Updates every 2 seconds.
 
         :param worker_id: Worker ID
-        :param max_task_duration_last_updated: Last updated datetime
+        :param max_task_duration_last_updated: Last updated timestamp
         :param max_task_duration_list: Local worker insights container that holds (task duration, task args) tuples,
             sorted for heapq
         :param force_update: Whether to force the update
-        :return: Last updated datetime
+        :return: Last updated timestamp
         """
-        now = datetime.now()
-        if self.insights_enabled and (force_update or (now - max_task_duration_last_updated).total_seconds() > 2):
+        now = time.time()
+        if self.insights_enabled and (force_update or (now - max_task_duration_last_updated) > 2):
             task_durations, task_args = zip(*max_task_duration_list)
-            self.max_task_duration[worker_id * 5:(worker_id + 1) * 5] = task_durations
+            self.max_task_duration[worker_id * 5 : (worker_id + 1) * 5] = task_durations
             with self.insights_manager_lock:
-                self.max_task_args[worker_id * 5:(worker_id + 1) * 5] = task_args
+                self.max_task_args[worker_id * 5 : (worker_id + 1) * 5] = task_args
             max_task_duration_last_updated = now
 
         return max_task_duration_last_updated
@@ -161,6 +155,7 @@ class WorkerInsights:
 
         :return: dictionary containing worker insights
         """
+
         def argsort(seq):
             """
             argsort, as to not be dependent on numpy, by
@@ -188,10 +183,10 @@ class WorkerInsights:
         for idx in sorted_idx:
             if self.max_task_duration[idx] == 0:
                 break
-            if self.max_task_args[idx] == "" and not RUNNING_WINDOWS:
+            if self.max_task_args[idx] == "":
                 continue
             top_5_max_task_durations.append(format_seconds_func(self.max_task_duration[idx]))
-            top_5_max_task_args.append("" if RUNNING_WINDOWS else self.max_task_args[idx])
+            top_5_max_task_args.append(self.max_task_args[idx])
 
         # Populate
         total_start_up_time = sum(self.worker_start_up_time)
@@ -214,7 +209,7 @@ class WorkerInsights:
                         top_5_max_task_durations=top_5_max_task_durations,
                         top_5_max_task_args=top_5_max_task_args)
 
-        insights['total_time'] = format_seconds_func(total_time)
+        insights["total_time"] = format_seconds_func(total_time)
 
         # Calculate ratio, mean and standard deviation of different parts of the worker lifespan
         for part, total in (('start_up', total_start_up_time),
@@ -269,9 +264,8 @@ class WorkerInsights:
         insights_str.extend(["",
                              "Top 5 longest tasks",
                              "-------------------"])
-        max_task_duration_args_separator = "" if RUNNING_WINDOWS else " - "
         for task_idx, (duration, args) in enumerate(zip(insights['top_5_max_task_durations'],
                                                         insights['top_5_max_task_args']), start=1):
-            insights_str.append(f"{task_idx}. Time: {duration}{max_task_duration_args_separator}{args}")
+            insights_str.append(f"{task_idx}. Time: {duration} - {args}")
 
         return "\n".join(insights_str)

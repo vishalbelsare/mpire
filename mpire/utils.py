@@ -2,9 +2,12 @@ import heapq
 import itertools
 import math
 import os
-from datetime import datetime, timedelta
-from multiprocessing import Array, cpu_count
-from typing import Callable, Generator, Iterable, List, Optional, Tuple, Union
+import time
+from datetime import timedelta
+from multiprocessing import cpu_count
+from multiprocessing.managers import SyncManager
+from multiprocessing.sharedctypes import SynchronizedArray
+from typing import Callable, Collection, Generator, Iterable, List, Optional, Tuple, Union
 
 try:
     import numpy as np
@@ -13,7 +16,7 @@ except ImportError:
     np = None
     NUMPY_INSTALLED = False
 
-from mpire.context import RUNNING_WINDOWS
+from mpire.context import RUNNING_MACOS, RUNNING_WINDOWS, mp_dill
 
 # Needed for setting CPU affinity
 if RUNNING_WINDOWS:
@@ -54,13 +57,16 @@ def set_cpu_affinity(pid: int, mask: List[int]) -> None:
         # Get handle and set affinity
         handle = win32api.OpenProcess(win32con.PROCESS_ALL_ACCESS, True, pid)
         win32process.SetProcessAffinityMask(handle, windows_mask)
+    elif RUNNING_MACOS:
+        # On MacOS we can't set CPU affinity
+        pass
     else:
         os.sched_setaffinity(pid, mask)
 
 
 def chunk_tasks(iterable_of_args: Iterable, iterable_len: Optional[int] = None,
                 chunk_size: Optional[Union[int, float]] = None, n_splits: Optional[int] = None) \
-        -> Generator[Iterable, None, None]:
+        -> Generator[Collection, None, None]:
     """
     Chunks tasks such that individual workers will receive chunks of tasks rather than individual ones, which can
     speed up processing drastically.
@@ -85,8 +91,8 @@ def chunk_tasks(iterable_of_args: Iterable, iterable_len: Optional[int] = None,
         elif hasattr(iterable_of_args, '__len__'):
             n_tasks = len(iterable_of_args)
         else:
-            raise ValueError('Failed to obtain length of iterable when chunk size is None. Remedy: either provide an '
-                             'iterable with a len() function or specify iterable_len in the function call')
+            raise ValueError('Either iterable_len or an iterable with a len() function should be provided when '
+                             'chunk_size and n_splits are None')
 
         # Determine chunk size
         chunk_size = n_tasks / n_splits
@@ -215,7 +221,8 @@ class TimeIt:
     """ Simple class that provides a context manager for keeping track of task duration and adds the total number
      of seconds in a designated output array """
 
-    def __init__(self, cum_time_array: Optional[Array], array_idx: int, max_time_array: Optional[Array] = None,
+    def __init__(self, cum_time_array: Optional[SynchronizedArray], array_idx: int, 
+                 max_time_array: Optional[SynchronizedArray] = None, 
                  format_args_func: Optional[Callable] = None) -> None:
         """
         :param cum_time_array: Optional array to store cumulative time in
@@ -229,15 +236,57 @@ class TimeIt:
         self.array_idx = array_idx
         self.max_time_array = max_time_array
         self.format_args_func = format_args_func
-        self.start_dt = None
+        self.start_time = None
 
     def __enter__(self) -> None:
-        self.start_dt = datetime.now()
+        self.start_time = time.time()
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        duration = (datetime.now() - self.start_dt).total_seconds()
+        duration = time.time() - self.start_time
         if self.cum_time_array is not None:
             self.cum_time_array[self.array_idx] += duration
         if self.max_time_array is not None and duration > self.max_time_array[0][0]:
             heapq.heappushpop(self.max_time_array,
                               (duration, self.format_args_func() if self.format_args_func is not None else None))
+
+
+def create_sync_manager(use_dill: bool) -> SyncManager:
+    """
+    Create a SyncManager instance
+
+    :param use_dill: Whether dill is used as serialization library
+    :return: SyncManager instance
+    """
+    authkey = os.urandom(24)
+    return mp_dill.managers.SyncManager(authkey=authkey) if use_dill else SyncManager(authkey=authkey)
+
+    
+class NonPickledSyncManager:
+    """ SyncManager wrapper that won't be pickled """
+    
+    def __init__(self, use_dill: bool) -> None:
+        """
+        :param use_dill: Whether dill is used as serialization library
+        """
+        self.manager = create_sync_manager(use_dill)
+        
+    def __getattr__(self, item: str):
+        return getattr(self.manager, item)
+
+    def __getstate__(self) -> dict:
+        """
+        Returns the state excluding the manager object, as this is not picklable and not needed.
+        
+        :return: State dict
+        """
+        state = self.__dict__.copy()
+        state["manager"] = None
+        return state
+
+    def __setstate__(self, state: dict) -> None:
+        """
+        Set the state.
+        
+        :param state: State dict
+        """
+        self.__dict__ = state

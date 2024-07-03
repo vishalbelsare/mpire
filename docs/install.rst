@@ -18,20 +18,22 @@ and is available through conda-forge:
     conda install -c conda-forge mpire
 
 
-.. note::
-
-    MPIRE is only available for Python >= 3.6.
-
 Dependencies
 ------------
 
-- Python >= 3.6
+- Python >= 3.8
 
 Python packages (installed automatically when installing MPIRE):
 
 - tqdm
-- dataclasses (Python 3.6 only)
+- pygments
 - pywin32 (Windows only)
+- importlib_resources (Python < 3.9 only)
+
+.. note::
+
+    When using MPIRE on Windows with conda, you might need to install ``pywin32`` using ``conda install pywin32`` when
+    encountering a ``DLL failed to load`` error.
 
 .. _dilldep:
 
@@ -55,6 +57,22 @@ This will install multiprocess_, which uses ``dill`` under the hood. You can ena
 .. _dill: https://pypi.org/project/dill/
 .. _multiprocess: https://github.com/uqfoundation/multiprocess
 .. _BSD license of multiprocess: https://github.com/uqfoundation/multiprocess/blob/master/LICENSE
+
+
+.. _richdep:
+
+Rich progress bars
+~~~~~~~~~~~~~~~~~~
+
+If you want to use rich_ progress bars, you have to install the dependencies for it manually:
+
+.. code-block:: bash
+
+    pip install rich
+
+
+.. _rich: https://github.com/Textualize/rich
+
 
 .. _dashboarddep:
 

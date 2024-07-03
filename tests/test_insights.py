@@ -1,18 +1,31 @@
 import ctypes
 import multiprocessing as mp
 import unittest
-from datetime import datetime
-from multiprocessing import managers
+import warnings
+from multiprocessing import managers as mp_managers
 from time import sleep
 from unittest.mock import patch
 
+from multiprocess import managers as mp_dill_managers
+from tqdm import tqdm
+
 from mpire import WorkerPool
-from mpire.context import DEFAULT_START_METHOD
-from mpire.insights import RUNNING_WINDOWS, WorkerInsights
-from tests.utils import MockDatetimeNow
+from mpire.context import DEFAULT_START_METHOD, FORK_AVAILABLE, RUNNING_WINDOWS
+from mpire.insights import WorkerInsights
+from mpire.utils import NonPickledSyncManager
 
 
-def square(x):
+# Skip start methods that use fork if it's not available
+if not FORK_AVAILABLE:
+    TEST_START_METHODS = ['spawn', 'threading']
+else:
+    TEST_START_METHODS = ['fork', 'forkserver', 'spawn', 'threading']
+
+
+def square(barrier, x):
+    # Wait until all workers are ready
+    barrier.wait()
+
     # time.sleep is added for Windows compatibility, otherwise it says 0.0 time has passed
     sleep(0.001)
     return x * x
@@ -24,8 +37,8 @@ class WorkerInsightsTest(unittest.TestCase):
         """
         Test if resetting the insights is done properly
         """
-        for n_jobs in [1, 2, 4]:
-            insights = WorkerInsights(mp.get_context(DEFAULT_START_METHOD), n_jobs)
+        for n_jobs, use_dill in [(1, False), (2, True), (4, False)]:
+            insights = WorkerInsights(mp.get_context(DEFAULT_START_METHOD), n_jobs, use_dill)
             self.assertEqual(insights.ctx, mp.get_context(DEFAULT_START_METHOD))
             self.assertEqual(insights.n_jobs, n_jobs)
 
@@ -43,17 +56,11 @@ class WorkerInsightsTest(unittest.TestCase):
                 self.assertIsNone(insights.max_task_args)
 
             # Containers should be properly initialized
-            MockDatetimeNow.RETURN_VALUES = [datetime(1970, 1, 1, 1, 2, 3, 4)]
-            MockDatetimeNow.CURRENT_IDX = 0
-            with self.subTest('without initial values', n_jobs=n_jobs, enable_insights=True), \
-                    patch('mpire.insights.datetime', new=MockDatetimeNow):
+            with self.subTest('without initial values', n_jobs=n_jobs, enable_insights=True):
                 insights.reset_insights(enable_insights=True)
                 self.assertTrue(insights.insights_enabled)
                 self.assertIsInstance(insights.insights_manager_lock, mp.synchronize.Lock)
-                if RUNNING_WINDOWS:
-                    self.assertIsNone(insights.insights_manager)
-                else:
-                    self.assertIsInstance(insights.insights_manager, managers.SyncManager)
+                self.assertIsInstance(insights.insights_manager, NonPickledSyncManager)
                 self.assertIsInstance(insights.worker_start_up_time, ctypes.Array)
                 self.assertIsInstance(insights.worker_init_time, ctypes.Array)
                 self.assertIsInstance(insights.worker_n_completed_tasks, ctypes.Array)
@@ -61,7 +68,8 @@ class WorkerInsightsTest(unittest.TestCase):
                 self.assertIsInstance(insights.worker_working_time, ctypes.Array)
                 self.assertIsInstance(insights.worker_exit_time, ctypes.Array)
                 self.assertIsInstance(insights.max_task_duration, ctypes.Array)
-                self.assertIsInstance(insights.max_task_args, list if RUNNING_WINDOWS else managers.ListProxy)
+                self.assertIsInstance(insights.max_task_args, 
+                                      mp_dill_managers.ListProxy if use_dill else mp_managers.ListProxy)
 
                 # Basic sanity checks for the values
                 self.assertEqual(sum(insights.worker_start_up_time), 0)
@@ -71,8 +79,7 @@ class WorkerInsightsTest(unittest.TestCase):
                 self.assertEqual(sum(insights.worker_working_time), 0)
                 self.assertEqual(sum(insights.worker_exit_time), 0)
                 self.assertEqual(sum(insights.max_task_duration), 0)
-                if not RUNNING_WINDOWS:
-                    self.assertListEqual(list(insights.max_task_args), [''] * n_jobs * 5)
+                self.assertListEqual(list(insights.max_task_args), [''] * n_jobs * 5)
 
             # Set some values so we can test if the containers will be properly resetted
             insights.worker_start_up_time[0] = 1
@@ -85,9 +92,7 @@ class WorkerInsightsTest(unittest.TestCase):
             insights.max_task_args[0] = '8'
 
             # Containers should be properly initialized
-            MockDatetimeNow.CURRENT_IDX = 0
-            with self.subTest('with initial values', n_jobs=n_jobs, enable_insights=True), \
-                    patch('mpire.insights.datetime', new=MockDatetimeNow):
+            with self.subTest('with initial values', n_jobs=n_jobs, enable_insights=True):
                 insights.reset_insights(enable_insights=True)
                 # Basic sanity checks for the values
                 self.assertEqual(sum(insights.worker_start_up_time), 0)
@@ -119,53 +124,71 @@ class WorkerInsightsTest(unittest.TestCase):
         Insight containers are initially set to None values. When enabled they should be changed to appropriate
         containers. When a second task is started it should reset them. If disabled, they should remain None
         """
-        with WorkerPool(n_jobs=2, enable_insights=True) as pool:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            
+            print()
+            for start_method in tqdm(TEST_START_METHODS):
 
-            # We run this a few times to see if it resets properly. We only verify this by checking the
-            # n_completed_tasks
-            for idx in range(3):
-                with self.subTest('enabled', idx=idx):
+                with WorkerPool(n_jobs=2, start_method=start_method, enable_insights=True) as pool:
 
-                    pool.map(square, self._get_tasks(10), worker_init=self._init, worker_exit=self._exit)
+                    # We run this a few times to see if it resets properly. We only verify this by checking the
+                    # n_completed_tasks
+                    for idx in range(3):
+                        with self.subTest('enabled', idx=idx, start_method=start_method):
 
-                    # Basic sanity checks for the values. Some max task args can be empty, in that case the duration
-                    # should be 0 (= no data)
-                    self.assertGreater(sum(pool._worker_insights.worker_start_up_time), 0)
-                    self.assertGreater(sum(pool._worker_insights.worker_init_time), 0)
-                    self.assertEqual(sum(pool._worker_insights.worker_n_completed_tasks), 10)
-                    self.assertGreater(sum(pool._worker_insights.worker_waiting_time), 0)
-                    self.assertGreater(sum(pool._worker_insights.worker_working_time), 0)
-                    self.assertGreater(sum(pool._worker_insights.worker_exit_time), 0)
-                    self.assertGreater(max(pool._worker_insights.max_task_duration), 0)
-                    for duration, args in zip(pool._worker_insights.max_task_duration,
-                                              pool._worker_insights.max_task_args):
-                        if duration == 0:
-                            self.assertEqual(args, '')
-                        elif not RUNNING_WINDOWS:
-                            self.assertIn(args, {'Arg 0: 0', 'Arg 0: 1', 'Arg 0: 2', 'Arg 0: 3', 'Arg 0: 4',
-                                                 'Arg 0: 5', 'Arg 0: 6', 'Arg 0: 7', 'Arg 0: 8', 'Arg 0: 9'})
+                            # We add a barrier so we know that all workers are ready. After that, the workers start 
+                            # working. Additionally, we set chunk size to 1, max tasks active to 2, and have a 
+                            # time.sleep in the get_tasks function, so we know for sure that there will be waiting time
+                            barrier = pool.ctx.Barrier(2)
+                            pool.set_shared_objects(barrier)
+                            pool.map(square, self._get_tasks(10), worker_init=self._init, worker_exit=self._exit,
+                                    max_tasks_active=2, chunk_size=1)
 
-        with WorkerPool(n_jobs=2, enable_insights=False) as pool:
+                            # Basic sanity checks for the values. For some reason, testing Windows on Github Actions 
+                            # can sometimes lead to zero start up time. Additionally, some max task args can be empty,
+                            # in that case the duration should be 0 (= no data)
+                            if RUNNING_WINDOWS:
+                                self.assertGreaterEqual(sum(pool._worker_insights.worker_start_up_time), 0)
+                            else:
+                                self.assertGreater(sum(pool._worker_insights.worker_start_up_time), 0)
+                            self.assertGreater(sum(pool._worker_insights.worker_init_time), 0)
+                            self.assertEqual(sum(pool._worker_insights.worker_n_completed_tasks), 10)
+                            self.assertGreater(sum(pool._worker_insights.worker_waiting_time), 0)
+                            self.assertGreater(sum(pool._worker_insights.worker_working_time), 0)
+                            self.assertGreater(sum(pool._worker_insights.worker_exit_time), 0)
+                            self.assertGreater(max(pool._worker_insights.max_task_duration), 0)
+                            for duration, args in zip(pool._worker_insights.max_task_duration,
+                                                    pool._worker_insights.max_task_args):
+                                if duration == 0:
+                                    self.assertEqual(args, '')
+                                else:
+                                    self.assertIn(args, {'Arg 0: 0', 'Arg 0: 1', 'Arg 0: 2', 'Arg 0: 3', 'Arg 0: 4',
+                                                        'Arg 0: 5', 'Arg 0: 6', 'Arg 0: 7', 'Arg 0: 8', 'Arg 0: 9'})
 
-            # Disabling should set things to None again
-            with self.subTest('disable'):
-                pool.map(square, range(10))
-                self.assertIsNone(pool._worker_insights.insights_manager)
-                self.assertIsNone(pool._worker_insights.insights_manager_lock)
-                self.assertIsNone(pool._worker_insights.worker_start_up_time)
-                self.assertIsNone(pool._worker_insights.worker_init_time)
-                self.assertIsNone(pool._worker_insights.worker_n_completed_tasks)
-                self.assertIsNone(pool._worker_insights.worker_waiting_time)
-                self.assertIsNone(pool._worker_insights.worker_working_time)
-                self.assertIsNone(pool._worker_insights.worker_exit_time)
-                self.assertIsNone(pool._worker_insights.max_task_duration)
-                self.assertIsNone(pool._worker_insights.max_task_args)
+                with WorkerPool(n_jobs=2, enable_insights=False) as pool:
+
+                    # Disabling should set things to None again
+                    with self.subTest('disable', start_method=start_method):
+                        barrier = pool.ctx.Barrier(2)
+                        pool.set_shared_objects(barrier)
+                        pool.map(square, range(10))
+                        self.assertIsNone(pool._worker_insights.insights_manager)
+                        self.assertIsNone(pool._worker_insights.insights_manager_lock)
+                        self.assertIsNone(pool._worker_insights.worker_start_up_time)
+                        self.assertIsNone(pool._worker_insights.worker_init_time)
+                        self.assertIsNone(pool._worker_insights.worker_n_completed_tasks)
+                        self.assertIsNone(pool._worker_insights.worker_waiting_time)
+                        self.assertIsNone(pool._worker_insights.worker_working_time)
+                        self.assertIsNone(pool._worker_insights.worker_exit_time)
+                        self.assertIsNone(pool._worker_insights.max_task_duration)
+                        self.assertIsNone(pool._worker_insights.max_task_args)
 
     def test_get_max_task_duration_list(self):
         """
         Test that the right containers are selected given a worker ID
         """
-        insights = WorkerInsights(mp.get_context(DEFAULT_START_METHOD), n_jobs=5)
+        insights = WorkerInsights(mp.get_context(DEFAULT_START_METHOD), n_jobs=5, use_dill=False)
 
         with self.subTest(insights_enabled=False):
             for worker_id in range(5):
@@ -188,34 +211,26 @@ class WorkerInsightsTest(unittest.TestCase):
         """
         Test that the start up time is correctly added to worker_start_up_time for the right index
         """
-        MockDatetimeNow.RETURN_VALUES = [datetime(1970, 1, 1, 0, 0, 0, 0),
-                                         datetime(1970, 1, 1, 0, 0, 2, 0),
-                                         datetime(1970, 1, 1, 0, 0, 3, 0),
-                                         datetime(1970, 1, 1, 0, 0, 7, 0),
-                                         datetime(1970, 1, 1, 0, 0, 8, 0)]
-        MockDatetimeNow.CURRENT_IDX = 0
-
-        insights = WorkerInsights(mp.get_context(DEFAULT_START_METHOD), n_jobs=5)
+        insights = WorkerInsights(mp.get_context(DEFAULT_START_METHOD), n_jobs=5, use_dill=False)
 
         # Shouldn't do anything when insights haven't been enabled
-        with self.subTest(insights_enabled=False), patch('mpire.insights.datetime', new=MockDatetimeNow):
+        with self.subTest(insights_enabled=False), patch('time.time', side_effect=[1.0, 2.0, 3.0, 7.0, 8.0]):
             for worker_id in range(5):
-                insights.update_start_up_time(worker_id, datetime(1970, 1, 1, 0, 0, 0, 0))
+                insights.update_start_up_time(worker_id, 1.0)
             self.assertIsNone(insights.worker_start_up_time)
 
         insights.reset_insights(enable_insights=True)
-        MockDatetimeNow.CURRENT_IDX = 0
 
-        with self.subTest(insights_enabled=True), patch('mpire.insights.datetime', new=MockDatetimeNow):
+        with self.subTest(insights_enabled=True), patch('time.time', side_effect=[1.0, 2.0, 3.0, 7.0, 8.0]):
             for worker_id in range(5):
-                insights.update_start_up_time(worker_id, datetime(1970, 1, 1, 0, 0, 0, 0))
-            self.assertListEqual(list(insights.worker_start_up_time), [0, 2, 3, 7, 8])
+                insights.update_start_up_time(worker_id, 1.0)
+            self.assertListEqual(list(insights.worker_start_up_time), [0.0, 1.0, 2.0, 6.0, 7.0])
 
     def test_update_n_completed_tasks(self):
         """
         Test that the number of completed tasks is correctly added to worker_n_completed_tasks for the right index
         """
-        insights = WorkerInsights(mp.get_context(DEFAULT_START_METHOD), n_jobs=5)
+        insights = WorkerInsights(mp.get_context(DEFAULT_START_METHOD), n_jobs=5, use_dill=False)
 
         # Shouldn't do anything when insights haven't been enabled
         with self.subTest(insights_enabled=False):
@@ -235,18 +250,12 @@ class WorkerInsightsTest(unittest.TestCase):
         """
         Test whether the update_task_insights is triggered correctly when ``force_update=False``.
         """
-        MockDatetimeNow.RETURN_VALUES = [datetime(1970, 1, 1, 0, 0, 0, 0),
-                                         datetime(1970, 1, 1, 0, 0, 2, 0),
-                                         datetime(1970, 1, 1, 0, 0, 3, 0),
-                                         datetime(1970, 1, 1, 0, 0, 7, 0),
-                                         datetime(1970, 1, 1, 0, 0, 8, 0)]
-        MockDatetimeNow.CURRENT_IDX = 0
-
-        insights = WorkerInsights(mp.get_context(DEFAULT_START_METHOD), n_jobs=5)
-        max_task_duration_last_updated = datetime(1970, 1, 1, 0, 0, 1, 0)
+        insights = WorkerInsights(mp.get_context(DEFAULT_START_METHOD), n_jobs=5, use_dill=False)
+        max_task_duration_last_updated = 1.0
 
         # Shouldn't do anything when insights haven't been enabled
-        with self.subTest(insights_enabled=False), patch('mpire.insights.datetime', new=MockDatetimeNow):
+        with self.subTest(insights_enabled=False), \
+                patch('mpire.insights.time.time', side_effect=[0.0, 2.0, 3.0, 7.0, 8.0]):
             for worker_id in range(5):
                 max_task_duration_list = insights.get_max_task_duration_list(worker_id)
                 insights.update_task_insights(worker_id, max_task_duration_last_updated, max_task_duration_list,
@@ -255,11 +264,10 @@ class WorkerInsightsTest(unittest.TestCase):
             self.assertIsNone(insights.max_task_args)
 
         insights.reset_insights(enable_insights=True)
-        max_task_duration_last_updated = datetime(1970, 1, 1, 0, 0, 1, 0)
-        MockDatetimeNow.CURRENT_IDX = 0
+        max_task_duration_last_updated = 1.0
 
         # The first three worker IDs won't send an update because the two seconds hasn't passed yet.
-        with self.subTest(insights_enabled=True), patch('mpire.insights.datetime', new=MockDatetimeNow):
+        with self.subTest(insights_enabled=True), patch('time.time', side_effect=[0.0, 2.0, 3.0, 7.0, 8.0]):
             last_updated_times = []
             for worker_id, max_task_duration_list in [
                 (0, [(0.1, '0'), (0.2, '1'), (0.3, '2'), (0.4, '3'), (0.5, '4')]),
@@ -271,9 +279,7 @@ class WorkerInsightsTest(unittest.TestCase):
                 last_updated_times.append(insights.update_task_insights(
                     worker_id, max_task_duration_last_updated, max_task_duration_list, force_update=False
                 ))
-            self.assertListEqual(last_updated_times, [datetime(1970, 1, 1, 0, 0, 1), datetime(1970, 1, 1, 0, 0, 1),
-                                                      datetime(1970, 1, 1, 0, 0, 1), datetime(1970, 1, 1, 0, 0, 7),
-                                                      datetime(1970, 1, 1, 0, 0, 8)])
+            self.assertListEqual(last_updated_times, [1.0, 1.0, 1.0, 7.0, 8.0])
             self.assertListEqual(list(insights.max_task_duration), [0.0, 0.0, 0.0, 0.0, 0.0,
                                                                     0.0, 0.0, 0.0, 0.0, 0.0,
                                                                     0.0, 0.0, 0.0, 0.0, 0.0,
@@ -289,41 +295,38 @@ class WorkerInsightsTest(unittest.TestCase):
         """
         Test whether task insights are being updated correctly
         """
-        MockDatetimeNow.RETURN_VALUES = [datetime(1970, 1, 1, 0, 0, 1, 0),
-                                         datetime(1970, 1, 1, 0, 0, 2, 0)]
-        MockDatetimeNow.CURRENT_IDX = 0
-
-        insights = WorkerInsights(mp.get_context(DEFAULT_START_METHOD), n_jobs=2)
-        max_task_duration_last_updated = datetime(1970, 1, 1, 0, 0, 0, 0)
-
+        insights = WorkerInsights(mp.get_context(DEFAULT_START_METHOD), n_jobs=2, use_dill=False)
+        max_task_duration_last_updated = 0.0
+        
         # Shouldn't do anything when insights haven't been enabled
-        with self.subTest(insights_enabled=False), patch('mpire.insights.datetime', new=MockDatetimeNow):
+        with self.subTest(insights_enabled=False), patch('time.time', side_effect=[1.0, 2.0]):
             for worker_id in range(2):
                 max_task_duration_last_updated = insights.update_task_insights(
                     worker_id, max_task_duration_last_updated, [(0.1, '1'), (0.2, '2')], force_update=True
                 )
             self.assertIsNone(insights.max_task_duration)
             self.assertIsNone(insights.max_task_args)
-            self.assertEqual(max_task_duration_last_updated, datetime(1970, 1, 1, 0, 0, 0, 0))
+            self.assertEqual(max_task_duration_last_updated, 0.0)
 
         insights.reset_insights(enable_insights=True)
-        max_task_duration_last_updated = datetime(1970, 1, 1, 0, 0, 0, 0)
-        MockDatetimeNow.CURRENT_IDX = 0
+        max_task_duration_last_updated = 0.0
 
-        with self.subTest(insights_enabled=True), patch('mpire.insights.datetime', new=MockDatetimeNow):
-            for worker_id, max_task_duration_list in [(0, [(5, '5'), (6, '6'), (7, '7'), (8, '8'), (9, '9')]),
-                                                      (1, [(0, '0'), (1, '1'), (2, '2'), (3, '3'), (4, '4')])]:
+        with self.subTest(insights_enabled=True), patch('time.time', side_effect=[1, 2]):
+            for worker_id, max_task_duration_list in [
+                    (0, [(5.0, '5'), (6.0, '6'), (7.0, '7'), (8.0, '8'), (9.0, '9')]),
+                    (1, [(0.0, '0'), (1.0, '1'), (2.0, '2'), (3.0, '3'), (4.0, '4')])
+            ]:
                 self.assertEqual(insights.update_task_insights(
                     worker_id, max_task_duration_last_updated, max_task_duration_list, force_update=True
-                ), datetime(1970, 1, 1, 0, 0, worker_id + 1, 0))
-            self.assertListEqual(list(insights.max_task_duration), [5, 6, 7, 8, 9, 0, 1, 2, 3, 4])
+                ), worker_id + 1)
+            self.assertListEqual(list(insights.max_task_duration), [5.0, 6.0, 7.0, 8.0, 9.0, 0.0, 1.0, 2.0, 3.0, 4.0])
             self.assertListEqual(list(insights.max_task_args), ['5', '6', '7', '8', '9', '0', '1', '2', '3', '4'])
 
     def test_get_insights(self):
         """
         Test if the insights are properly processed
         """
-        insights = WorkerInsights(mp.get_context(DEFAULT_START_METHOD), n_jobs=2)
+        insights = WorkerInsights(mp.get_context(DEFAULT_START_METHOD), n_jobs=2, use_dill=False)
 
         with self.subTest(enable_insights=False):
             insights.reset_insights(enable_insights=False)
@@ -366,7 +369,7 @@ class WorkerInsightsTest(unittest.TestCase):
                 'total_working_time': '0:01:19',
                 'total_exit_time': '0:00:00.770',
                 'top_5_max_task_durations': ['0:00:06', '0:00:02', '0:00:01', '0:00:00.800', '0:00:00.100'],
-                'top_5_max_task_args': ['', '', '', '', ''] if RUNNING_WINDOWS else ['3', '2', '1', '4', '5'],
+                'top_5_max_task_args': ['3', '2', '1', '4', '5'],
                 'total_time': '0:01:21.100',
                 'start_up_time_mean': '0:00:00.150', 'start_up_time_std': '0:00:00.050',
                 'init_time_mean': '0:00:00.165', 'init_time_std': '0:00:00.055',
@@ -384,11 +387,11 @@ class WorkerInsightsTest(unittest.TestCase):
             yield i
 
     @staticmethod
-    def _init():
+    def _init(*_):
         # sleep is added for Windows compatibility, otherwise it says 0.0 time has passed
         sleep(0.001)
 
     @staticmethod
-    def _exit():
+    def _exit(*_):
         # sleep is added for Windows compatibility, otherwise it says 0.0 time has passed
         sleep(0.001)

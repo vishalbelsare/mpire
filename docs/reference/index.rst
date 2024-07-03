@@ -11,6 +11,14 @@ WorkerPool
   :special-members:
 
 
+AsyncResult
+-----------
+
+.. autoclass:: mpire.async_result.AsyncResult
+  :members:
+  :special-members:
+
+
 Task chunking
 -------------
 .. autofunction:: mpire.utils.chunk_tasks
@@ -26,6 +34,12 @@ Dashboard
 .. autofunction:: mpire.dashboard.start_dashboard
 
 .. autofunction:: mpire.dashboard.connect_to_dashboard
+
+.. autofunction:: mpire.dashboard.shutdown_dashboard
+
+.. autofunction:: mpire.dashboard.get_stacklevel
+
+.. autofunction:: mpire.dashboard.set_stacklevel
 
 
 Other

@@ -1,6 +1,7 @@
 import multiprocessing as mp
 try:
     import multiprocess as mp_dill
+    import multiprocess.managers  # Needed in utils.py
 except ImportError:
     mp_dill = None
 import platform
@@ -13,16 +14,19 @@ try:
 except ValueError:
     FORK_AVAILABLE = False
 
-# Check if we're running on Windows
+# Check if we're running on Windows or MacOS
 RUNNING_WINDOWS = platform.system() == "Windows"
+RUNNING_MACOS = platform.system() == "Darwin"
 
 
 # Threading context so we can use threading as backend as well
 class ThreadingContext:
 
     Barrier = threading.Barrier
+    Condition = threading.Condition
     Event = threading.Event
     Lock = threading.Lock
+    RLock = threading.RLock
     Thread = threading.Thread
 
     # threading doesn't have Array and JoinableQueue, so we take it from multiprocessing. Both are thread-safe. We need
